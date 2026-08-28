@@ -16,8 +16,7 @@ The script does not require Administrator rights. Every change is per-user
 | `pink.scheme.ini` accent   | Windows accent color `#FF2E6D` on the taskbar, the Start menu, the title bars |
 | white/pink palette         | Light mode (apps and system) with the accent on the taskbar                |
 | `picom` blur               | Frosted acrylic on the taskbar and the Start menu                          |
-| `Cookie` / `Iosevka` / `Source Code Pro` fonts | Installed per-user, registered under their real family names, used by Windows Terminal |
-| `termite` colors           | A "Hello Kitty" color scheme for Windows Terminal, with acrylic terminal   |
+| `termite` colors           | A "Hello Kitty" color scheme for Windows Terminal, with acrylic terminal |
 
 ## Why the Start menu stayed blue
 
@@ -40,14 +39,21 @@ old theme.
 
 ## Usage
 
-Run these commands from a PowerShell prompt in this folder:
+The easiest way is the tiny GUI. Double-click `hello-kitty.bat`.
+
+The window has four buttons: **Apply Hello Kitty**, **Restore mine**,
+**Toggle**, **Save current .theme**, and **Refresh status**. Clicking one runs
+the same PowerShell script from below and streams its output into the log box.
+The GUI never needs Administrator rights.
+
+You can also run the same commands from a PowerShell prompt in this folder:
 
 ```powershell
 .\hello-kitty.ps1 toggle     # flip between Hello Kitty and your saved theme
 .\hello-kitty.ps1 apply      # turn Hello Kitty ON  (auto-saves your theme first)
 .\hello-kitty.ps1 restore    # turn Hello Kitty OFF (back to your saved theme)
 .\hello-kitty.ps1 status     # show what is currently active
-.\hello-kitty.ps1 install    # only fetch assets + install fonts (no theme change)
+.\hello-kitty.ps1 install    # only fetch assets (no theme change)
 ```
 
 `toggle` is the main command. It reads the mode from
@@ -64,24 +70,41 @@ theming system.
 ```powershell
 .\hello-kitty.ps1 themes              # list installed Windows themes (native)
 .\hello-kitty.ps1 theme-switch 3      # switch to theme #3 (native apply, like Settings)
-.\hello-kitty.ps1 theme-save C:\path  # save the current theme natively
-.\hello-kitty.ps1 theme-restore C:\path  # install + apply a saved theme (like the MS Store)
+.\hello-kitty.ps1 theme-save [path]   # save the CURRENT theme as a real .theme file
+.\hello-kitty.ps1 savetheme [path]    # alias of theme-save
+.\hello-kitty.ps1 theme-restore path  # apply a .theme file natively (like double-clicking)
 .\hello-kitty.ps1 theme-file          # (re)generate an installable "Hello Kitty.theme"
 .\hello-kitty.ps1 theme-file apply    # ... and apply it natively (same as double-clicking)
+.\hello-kitty.ps1 restart-shell       # forced shell restart (guarded; apply/restore never restart it)
 .\hello-kitty.ps1 taskbar-acrylic 120 # live-tune taskbar frosting (0 = transparent .. 255 = max blur)
 .\hello-kitty.ps1 start-acrylic 96    # live-tune Start menu transparency (0 = fully transparent .. 255 = solid pink)
 ```
 
-- `theme-save` creates the roaming theme blob. This blob has the same format
-  family as the Microsoft Store theme packs. It contains the `.theme` file and
-  the embedded wallpaper.
-- `theme-file` writes a real theme file (`Hello Kitty.theme`) into the user
-  themes folder. The format is the same one Windows writes. The theme appears
-  in Settings and in the `themes` listing. You can double-click the file or
-  share it like any `.theme` file. The `.theme` file carries the wallpaper, its
-  position, the accent, the auto-colorization, and the light/dark mode. The
-  registry layer (`apply`) adds what the `.theme` file cannot carry: the
-  Start-menu accent palette, the transparency, the taskbar acrylic.
+- `theme-save` (alias `savetheme`) writes the current theme to a real,
+  plain-text `.theme` file - the same format Windows and `theme-file` write.
+  With no path it creates `Saved theme <timestamp>.theme` in
+  `%LOCALAPPDATA%\Microsoft\Windows\Themes`, so it appears in Settings >
+  Personalization > Themes, exactly like `Hello Kitty.theme`. The file carries
+  your current wallpaper (+ its position), accent color, auto-colorization and
+  light/dark mode.
+- `theme-restore <path>` applies any `.theme` file natively by handing it to
+  the Windows shell - identical to double-clicking it in Explorer.
+- `theme-file` writes `Hello Kitty.theme` into the user themes folder. That file
+  appears in Settings and in the `themes` listing (double-click it or run
+  `theme-file apply` to apply natively). The `.theme` files carry the wallpaper,
+  its position, the accent, auto-colorization and the light/dark mode. The
+  registry layer (`apply`) adds what a `.theme` file cannot carry: the Start-menu
+  accent palette, the transparency, the taskbar acrylic.
+- `restart-shell` explicitly restarts explorer (guarded: verifies the shell is
+  back AND stable, retries, and never leaves it dead). `apply` and `restore` do
+  NOT restart explorer anymore - see below.
+
+> **Why not the old native blob export?** Earlier versions used the
+> reverse-engineered `ExportRoamingThemeToStream` COM call. It returns success
+> but from a standalone process it only serializes an ~82-byte header - no
+> wallpaper, no theme content - so the saved file was useless. `theme-save`
+> now writes a real `.theme` INI instead, which always works and shows up in
+> Settings like any other theme.
 
 > CAUTION: Do not switch to a "High Contrast" theme except for a deliberate
 > test. A switch to one of these themes turns on High Contrast mode. Normal
@@ -93,8 +116,9 @@ theming system.
 - You do not need Administrator rights for these commands. We verified these
   commands on Windows 10 21H2 (build 19044).
 
-> Tip: You can also use `hello-kitty.bat`. Double-click it to run the same
-> commands. For example, run `hello-kitty.bat toggle`.
+> Tip: You can also use `hello-kitty.bat`. Double-click it to open the tiny
+> GUI. Or pass a command to skip the GUI entirely, for example run
+> `hello-kitty.bat toggle`.
 
 ## How save and restore work
 
@@ -104,16 +128,25 @@ theming system.
   `%LOCALAPPDATA%\hello-kitty\saved-theme.json` and `terminal-backup.json`.
 - `restore` or `toggle` writes those values back exactly. Then it restarts
   Explorer. The change is visible.
+- Separately, `theme-save` / `savetheme` writes the current theme to a real
+  `.theme` file for sharing or for Settings > Themes. See above.
 
 ## Notes
 
-- Restart Windows Terminal once after the first run. Then it finds the Iosevka
-  Nerd Font. Until then, you can get a harmless "font not found" warning.
-- The change of the taskbar and title-bar color restarts `explorer.exe`. The
-  desktop flickers for a second. This is normal.
+- **Explorer is never restarted by `apply`/`restore` anymore.** The theme is
+  applied via a live "per-user settings changed" broadcast plus a restart of
+  only the Start-menu host process, so the desktop never flickers or dies. We
+  found that force-killing explorer and depending on Winlogon to bring it back
+  was the source of the "explorer is dead" bug: on machines where explorer
+  crashes shortly after restart (a recurring `explorer.exe` access violation
+  seen on this machine at fault offset `0x458aa`), Winlogon can stop restarting
+  the shell and the desktop stays dead while the script prints "Done". The
+  script now verifies the shell is alive instead of assuming it. If you
+  deliberately want a full shell restart, run `restart-shell`.
 - The script changes the Windows Terminal `settings.json`. It adds a
-  `Hello Kitty` scheme and points every profile at it. The script backs up your
-  original file and restores it fully on `restore`.
+  `Hello Kitty` scheme and points every profile at it (plus `useAcrylic` /
+  `opacity`). The script backs up your original file and restores it fully on
+  `restore`.
 - The terminal acrylic uses the current profile settings: `opacity` (0-100) and
   `useAcrylic`. Acrylic renders only while "Transparency effects" is on. The
   theme turns this on. Acrylic does not render during Battery Saver.
@@ -124,7 +157,9 @@ theming system.
   <0-255>`. On Windows 11, the taskbar ignores this value. The taskbar becomes
   frosted through `EnableTransparency` instead.
 - On some Windows 10 builds, a sign out and a sign in are necessary before the
-  Start-menu color changes appear. The script restarts Explorer first.
+  Start-menu color changes appear. The script refreshes the Start menu via its
+  host process first; if the color still does not appear, `restart-shell`
+  forces a full shell refresh.
 
 ## What the port does not include
 
@@ -149,8 +184,13 @@ always-on-top WPF or WinForms window. This script does not include one.
 ## Files
 
 - `hello-kitty.ps1` contains the full tool (one file, no modules).
-- `hello-kitty.bat` is the double-click launcher.
-- `assets/` contains the wallpaper and the three fonts. If they are missing,
-  the script downloads them from the source repo.
+- `hello-kitty-gui.ps1` is the tiny graphical wrapper (WinForms, part of the
+  Windows install - no extra dependencies).
+- `hello-kitty.bat` is the double-click launcher: no arguments opens the GUI,
+  arguments run the console tool (`hello-kitty.bat toggle`, ...).
+- `tests/` are regression tests for the CLI and the GUI
+  (`powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1`).
+- `assets/` contains the wallpaper. If it is missing, the script downloads it
+  from the source repo.
 - `RESEARCH.md` is the reverse-engineering map of the native Windows theming
   system.

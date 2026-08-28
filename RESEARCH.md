@@ -84,7 +84,7 @@ SetCurrentTheme(hwnd, idx, applyNow, applyFlags, packFlags)   # applyNow=1 == wh
 CreateThemePack(hwnd, path, packFlags)          # "save as pack" — E_INVALIDARG on 21H2 (unproven)
 CloneAndSetCurrentTheme / InstallThemePack / DeleteTheme / OpenTheme
 AddAndSelectTheme(hwnd, path, applyFlags, packFlags)
-ExportRoamingThemeToStream(IStream, 0)          # native "save current theme" — WORKS on 21H2
+ExportRoamingThemeToStream(IStream, 0)          # native "save current theme" — see caveat below
 ImportRoamingThemeFromStream(IStream, 0)        # native "install & apply saved theme" — WORKS
 ```
 
@@ -122,10 +122,25 @@ Done live while writing this doc — a C# COM interop probe from PowerShell (STA
   object is a bare C++ vtable, ThemeTool never QIs, it just calls slots).
 
 So the robust, ship-worthy native surface for our Windows 10/21H2 target:
-**enumerate (count/current/custom/default), switch by index, save-to-stream,
-restore-from-stream.** Theme *names* come from parsing `.theme` files in
-`%windir%\Resources\Themes` and `%LOCALAPPDATA%\Microsoft\Windows\Themes`
-(`[Theme] DisplayName=`).
+**enumerate (count/current/custom/default), switch by index.** Theme *names*
+come from parsing `.theme` files in `%windir%\Resources\Themes` and
+`%LOCALAPPDATA%\Microsoft\Windows\Themes` (`[Theme] DisplayName=`).
+
+> **Follow-up (2026-08-28): `ExportRoamingThemeToStream` is NOT a reliable save
+> path from a standalone process.** Re-tested on this machine: with
+> `current=custom=0` (active theme = `aero.theme`) the call returns S_OK but
+> serializes only an **82-byte container stub** (no `[Theme]`, no wallpaper) —
+> verified via `IStream.Stat` *and* `GlobalSize` (not a reading bug), even after
+> `Refresh()` + `GetTheme(cur)`. The full ~558 KB blob observed earlier was
+> produced by a probe that had first **imported** a roaming theme in-process
+> (`ImportRoamingThemeFromStream` → `Roamed.theme`), which materializes the
+> internal `XTheme` state the exporter reads. Without that in-process state the
+> exporter emits an empty header while still returning success — i.e. the old
+> "worked, trust us" signal was a silent data loss. Consequence: `theme-save`
+> in `hello-kitty.ps1` now writes a **plain `.theme` INI** (same format as
+> Windows' own `Custom.theme` / our `Hello Kitty.theme`) from the live registry
+> state — deterministic, installable via Settings, shareable, and it never
+> pretends to succeed on an empty export.
 
 ---
 
@@ -178,10 +193,12 @@ mapped (names/metadata are on Microsoft's symbol server):
    - `themes` — native list (count, indices, current/custom/default) + names
      parsed from `.theme` files
    - `theme-switch <index>` — `SetCurrentTheme(idx, applyNow=1)` (S_OK proven)
-   - `theme-save [path]` — `ExportRoamingThemeToStream` (S_OK proven; ~a
-     `.themepack`-like blob, wallpaper embedded)
-   - `theme-restore <path>` — `ImportRoamingThemeFromStream` (S_OK proven;
-     applies immediately, like opening a theme in Settings)
+   - `theme-save [path]` (alias `savetheme`) — writes a **plain `.theme` INI**
+     of the current live state (wallpaper/position, accent, auto-colorization,
+     light/dark mode) — deterministic; appears in Settings > Themes like any
+     other theme. (Replaced the COM stream export — see the caveat in §3.)
+   - `theme-restore <path>` — applies any `.theme` file via the Windows shell
+     (Start-Process = double-click semantics; native, no COM blob needed)
 
 Limitations (measured, not guessed): `CreateThemePack` is broken on 21H2;
 `ITheme` property reads need per-build vtable mapping (a small C++ RE task —
@@ -220,7 +237,8 @@ on 21H2:
   removes PowerShell COM interop friction and lets `AddAndSelectTheme`/packs
   get proper HWND flows.
 - **Write real `.themepack`/`.deskthemepack`** files (CAB containing `.theme` +
-  wallpaper) — both directions scheduled for future work, and the roaming
-  stream blob is already the native equivalent.
+  wallpaper) — both directions scheduled for future work (the roaming stream
+  blob turned out unreliable from standalone processes — see §3 caveat; a CAB
+  pack is a straightforward, deterministic alternative).
 - **Windhawk mod** if you want visual-style (`.msstyles`) switching without
   touching system files — pairs cleanly with the native manager.

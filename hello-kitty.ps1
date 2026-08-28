@@ -12,7 +12,6 @@
       * Light mode         -> apps + system set to light to match the white/pink palette
       * Start menu         -> frosted/translucent (EnableTransparency) + pink AccentPalette
       * Taskbar            -> most-transparent acrylic taskbar (TaskbarAcrylicOpacity 0)
-      * Fonts              -> Cookie (cute), Iosevka Nerd Font (mono) and Source Code Pro
       * Windows Terminal   -> a "Hello Kitty" color scheme (incl. translucent acrylic terminal)
 
     It never needs Administrator: every change is per-user (HKCU / %LOCALAPPDATA%).
@@ -22,10 +21,11 @@
     .\hello-kitty.ps1 apply      # turn Hello Kitty ON (auto-saves your theme first)
     .\hello-kitty.ps1 restore    # turn Hello Kitty OFF (back to your saved theme)
     .\hello-kitty.ps1 status     # show what is currently active
-    .\hello-kitty.ps1 install    # only fetch assets + install fonts (no theme change)
+    .\hello-kitty.ps1 install    # only fetch assets (no theme change)
     .\hello-kitty.ps1 themes     # list installed themes via the NATIVE Windows theme API
-    .\hello-kitty.ps1 theme-save [path]    # save current theme natively (like a Store theme pack)
-    .\hello-kitty.ps1 theme-restore <path> # install + apply a saved theme natively
+    .\hello-kitty.ps1 theme-save [path]    # save the CURRENT theme as a real .theme file
+    .\hello-kitty.ps1 theme-restore <path> # apply a .theme file natively (like double-clicking)
+    .\hello-kitty.ps1 restart-shell        # forced explorer restart (guarded, never leaves it dead)
     .\hello-kitty.ps1 theme-switch <idx>   # switch to an installed theme natively (see 'themes')
 #>
 
@@ -34,7 +34,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet('toggle', 'apply', 'restore', 'on', 'off', 'status', 'install',
                  'themes', 'theme-save', 'theme-restore', 'theme-switch', 'theme-file',
-                 'taskbar-acrylic', 'start-acrylic')]
+                 'restart-shell', 'savetheme', 'taskbar-acrylic', 'start-acrylic')]
     [string]$Command = 'toggle',
 
     [Parameter(Position = 1)]
@@ -54,9 +54,6 @@ $StatePath       = Join-Path $StateDir 'state.json'
 $TerminalBackup  = Join-Path $StateDir 'terminal-backup.json'
 
 $WallpaperSrc    = Join-Path $AssetsDir 'background.png'
-$FontCookie      = Join-Path $AssetsDir 'Cookie-Regular.ttf'
-$FontIosevka     = Join-Path $AssetsDir 'IosevkaNerdFontComplete-mod.ttf'
-$FontSourceCode  = Join-Path $AssetsDir 'SourceCodePro-Regular.otf'
 
 # The user themes folder - files here appear in Settings > Themes and in the
 # native theme manager listing ("themes" command).
@@ -172,9 +169,6 @@ public class HelloKittyWinAPI {
     // SPI_SETDESKWALLPAPER (20) with SPIF_UPDATEINIFILE | SPIF_SENDCHANGE (3)
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
-
-    [DllImport("gdi32.dll", CharSet = CharSet.Auto)]
-    public static extern int AddFontResource(string lpszFilename);
 }
 "@
     }
@@ -187,7 +181,9 @@ public class HelloKittyWinAPI {
 # Reverse-engineered by the SecureUxTheme project (LGPL-2.1):
 #   https://github.com/namazso/SecureUxTheme  (ThemeLib/theme.cpp, re/*.h)
 # Verified S_OK on Windows 10 21H2: Init, GetThemeCount/Current/Custom/Default,
-# SetCurrentTheme, ExportRoamingThemeToStream, ImportRoamingThemeFromStream.
+# SetCurrentTheme. NOTE: ExportRoamingThemeToStream returns S_OK but only emits
+# an ~82-byte serialization header from a bare CoCreateInstance process, so
+# 'theme-save' writes a plain .theme file instead (see Save-ThemeFile below).
 # NOTE: theme objects returned by GetTheme are bare C++ vtables (not QI-able)
 # whose layout shifts per build - we deliberately don't call into them.
 # ----------------------------------------------------------------------------
@@ -236,16 +232,6 @@ namespace HelloKittyThemeApi {
     public static extern int CoInitialize(IntPtr pvReserved);
     [DllImport("ole32.dll")]
     public static extern int CoCreateInstance(ref Guid clsid, IntPtr pUnk, uint dwClsContext, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object ppv);
-    [DllImport("ole32.dll")]
-    public static extern int CreateStreamOnHGlobal(IntPtr hGlobal, bool fDeleteOnRelease, out IStream ppstm);
-    [DllImport("ole32.dll")]
-    public static extern int GetHGlobalFromStream(IStream pstm, out IntPtr phGlobal);
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GlobalLock(IntPtr hMem);
-    [DllImport("kernel32.dll")]
-    public static extern bool GlobalUnlock(IntPtr hMem);
-    [DllImport("kernel32.dll")]
-    public static extern uint GlobalSize(IntPtr hMem);
 
     public static readonly Guid CLSID_ThemeManager2 = new Guid("9324da94-50ec-4a14-a770-e90ca03e7c8f");
     public static readonly Guid IID_IThemeManager2 = new Guid("c1e8c83e-845d-4d95-81db-e283fdffc000");
@@ -287,51 +273,6 @@ namespace HelloKittyThemeApi {
         using (var ctx = Open()) {
           ctx.Mg.Init(0);
           return ctx.Mg.SetCurrentTheme(IntPtr.Zero, idx, applyNow ? 1 : 0, 0, 0);
-        }
-      });
-    }
-
-    public static bool ExportRoaming(string filePath) {
-      return Sta<bool>(() => {
-        using (var ctx = Open()) {
-          ctx.Mg.Init(0);
-          IStream stm = null;
-          int hr = Interop.CreateStreamOnHGlobal(IntPtr.Zero, true, out stm);
-          if (hr != 0) throw new Exception("CreateStreamOnHGlobal failed 0x" + ((uint)hr).ToString("X8"));
-          hr = ctx.Mg.ExportRoamingThemeToStream(stm, 0);
-          if (hr != 0) throw new Exception("ExportRoamingThemeToStream failed 0x" + ((uint)hr).ToString("X8"));
-          IntPtr hg = IntPtr.Zero;
-          hr = Interop.GetHGlobalFromStream(stm, out hg);
-          if (hr != 0 || hg == IntPtr.Zero) throw new Exception("GetHGlobalFromStream failed 0x" + ((uint)hr).ToString("X8"));
-          uint size = Interop.GlobalSize(hg);
-          if (size == 0) throw new Exception("theme export is empty");
-          IntPtr p = Interop.GlobalLock(hg);
-          byte[] buf = new byte[size];
-          Marshal.Copy(p, buf, 0, (int)size);
-          Interop.GlobalUnlock(hg);
-          System.IO.File.WriteAllBytes(filePath, buf);
-          return true;
-        }
-      });
-    }
-
-    public static bool ImportRoaming(string filePath) {
-      return Sta<bool>(() => {
-        byte[] blob = System.IO.File.ReadAllBytes(filePath);
-        IntPtr h = Marshal.AllocHGlobal(blob.Length);
-        try {
-          Marshal.Copy(blob, 0, h, blob.Length);
-          using (var ctx = Open()) {
-            ctx.Mg.Init(0);
-            IStream stm = null;
-            int hr = Interop.CreateStreamOnHGlobal(h, false, out stm);
-            if (hr != 0) throw new Exception("CreateStreamOnHGlobal failed 0x" + ((uint)hr).ToString("X8"));
-            hr = ctx.Mg.ImportRoamingThemeFromStream(stm, 0);
-            if (hr != 0) throw new Exception("ImportRoamingThemeFromStream failed 0x" + ((uint)hr).ToString("X8"));
-            return true;
-          }
-        } finally {
-          Marshal.FreeHGlobal(h);
         }
       });
     }
@@ -456,50 +397,154 @@ function Show-NativeThemes {
     }
 }
 
-function Save-NativeTheme {
+function Save-ThemeFile {
     param([string]$Path)
-    if (-not $Path) { $Path = Join-Path $StateDir 'theme-export.theme' }
+    # Default: a timestamped .theme in the user themes folder so it shows up in
+    # Settings > Personalization > Themes - exactly like "Hello Kitty.theme".
+    if (-not $Path) {
+        $stamp = Get-Date -Format 'yyyy-MM-dd HHmmss'
+        $Path = Join-Path $UserThemesDir "Saved theme $stamp.theme"
+    }
     try {
-        Ensure-ThemeApi
         if (Test-Path $Path) { Write-Warn "Overwriting existing file: $Path" }
-        [HelloKittyThemeApi.Native]::ExportRoaming($Path) | Out-Null
-        Write-Ok "Current theme saved natively to: $Path"
-        Write-Info "(roaming theme blob - contains the .theme + wallpaper, like a Microsoft Store theme pack)"
-        Write-Info "Re-apply it with: hello-kitty.ps1 theme-restore `"$Path`""
+
+        $desk = 'HKCU:\Control Panel\Desktop'
+        $dwm  = 'HKCU:\Software\Microsoft\Windows\DWM'
+        $per  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+
+        $wallpaper = Get-RegString $desk 'Wallpaper'
+        if (-not $wallpaper -or -not (Test-Path $wallpaper)) {
+            Write-Warn "No wallpaper path in the registry - writing the theme without one."
+            $wallpaper = $null
+        }
+        # registry WallpaperStyle -> .theme PicturePosition:
+        #   10 Fill=4, 6 Fit=3, 22 Span=5, 2 Stretch=2 ; TileWallpaper=1 -> Tile=1 ; else Center=0
+        $style = Get-RegString $desk 'WallpaperStyle'
+        $tile  = Get-RegString $desk 'TileWallpaper'
+        if ($tile -eq '1') { $picturePos = 1 }
+        else {
+            switch ("$style") {
+                '10' { $picturePos = 4 }
+                '6'  { $picturePos = 3 }
+                '22' { $picturePos = 5 }
+                '2'  { $picturePos = 2 }
+                default { $picturePos = 0 }
+            }
+        }
+
+        $colorization = Get-RegDWord $dwm 'ColorizationColor'
+        if ($null -eq $colorization) { $colorization = ConvertTo-ColorDWord $HK_PINK }
+        $colorHex = '0X{0:X8}' -f $colorization
+        $autoColor = Get-RegDWord $desk 'AutoColorization'
+        if ($null -eq $autoColor) { $autoColor = 0 }
+
+        $perProps = Get-ItemProperty $per -ErrorAction SilentlyContinue
+        $sysLight  = if ($null -ne $perProps -and $null -ne $perProps.SystemUsesLightTheme) { [int]$perProps.SystemUsesLightTheme } else { 1 }
+        $appsLight = if ($null -ne $perProps -and $null -ne $perProps.AppsUseLightTheme) { [int]$perProps.AppsUseLightTheme } else { 1 }
+        $sysMode = if ($sysLight  -eq 1) { 'Light' } else { 'Dark' }
+        $appMode = if ($appsLight -eq 1) { 'Light' } else { 'Dark' }
+
+        $displayName = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+        $writeTime = 0
+        if ($wallpaper -and (Test-Path $wallpaper)) {
+            $writeTime = [System.IO.File]::GetLastWriteTimeUtc($wallpaper).ToFileTimeUtc()
+        }
+        $guid = [guid]::NewGuid().ToString().ToUpper()
+
+        $content = @(
+            '; Saved theme - generated by hello-kitty.ps1 theme-save'
+            ''
+            '[Theme]'
+            "DisplayName=$displayName"
+            "; stable id so the theme survives re-import"
+            "ThemeId={$guid}"
+            ''
+            '[Control Panel\Desktop]'
+            "Wallpaper=$wallpaper"
+            'Pattern='
+            'MultimonBackgrounds=0'
+            "PicturePosition=$picturePos"
+            "WallpaperWriteTime=$writeTime"
+            ''
+            '[VisualStyles]'
+            'Path=%SystemRoot%\resources\Themes\Aero\Aero.msstyles'
+            'ColorStyle=NormalColor'
+            'Size=NormalSize'
+            "AutoColorization=$autoColor"
+            "ColorizationColor=$colorHex"
+            "SystemMode=$sysMode"
+            "AppMode=$appMode"
+            'VisualStyleVersion=10'
+            ''
+            '[boot]'
+            'SCRNSAVE.EXE='
+            ''
+            '[MasterThemeSelector]'
+            'MTSM=RJSPBS'
+        )
+        $dir = Split-Path $Path -Parent
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        $content | Set-Content -Path $Path -Encoding Unicode
+        Write-Ok "Saved current theme to: $Path"
+        Write-Info "Wallpaper : $wallpaper"
+        Write-Info "Accent    : $colorHex   ($sysMode / $appMode mode)"
+        Write-Info "It is installed for Settings > Personalization > Themes - double-click it (or run theme-restore) to apply."
     } catch {
         Write-Warn "Could not save theme: $($_.Exception.Message)"
     }
 }
 
-function Restore-NativeTheme {
+<#
+  If a theme woke up High Contrast mode and the user didn't have it on before,
+  switch it back off (registry + SPI). Used after theme-switch / theme-restore.
+#>
+function Undo-HighContrastIfNeeded {
+    param([bool]$WasOn, [string]$What)
+    Start-Sleep -Milliseconds 1500
+    $hcFl = Get-ItemProperty 'HKCU:\Control Panel\Accessibility\HighContrast' -ErrorAction SilentlyContinue
+    $hcRegOn = ($null -ne $hcFl -and $hcFl.Flags -ne 126)   # 126 = baseline off; anything else = on
+    if (-not $WasOn -and ([HelloKittyThemeApi.Native]::IsHighContrastOn() -or $hcRegOn)) {
+        [HelloKittyThemeApi.Native]::ForceHighContrastOff() | Out-Null
+        $hcK = 'HKCU:\Control Panel\Accessibility\HighContrast'
+        if (Test-Path $hcK) {
+            Set-ItemProperty -Path $hcK -Name 'Flags' -Value 126 -Type DWord -Force
+            Set-ItemProperty -Path $hcK -Name 'High Contrast Scheme' -Value '' -Force
+            Remove-ItemProperty -Path $hcK -Name 'Previous High Contrast Scheme MUI Value' -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $hcK -Name 'Previous High Contrast Scheme MUI Ptr' -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $hcK -Name 'LastUpdatedThemeId' -ErrorAction SilentlyContinue
+        }
+        Write-Warn "$What turned ON High Contrast mode - it was switched back OFF automatically."
+    }
+}
+
+function Restore-ThemeFile {
     param([string]$Path)
     if (-not $Path -or -not (Test-Path $Path)) {
-        Write-Warn "Usage: hello-kitty.ps1 theme-restore <path-to-saved-theme>"
+        Write-Warn "Usage: hello-kitty.ps1 theme-restore <path-to-.theme-file>"
         return
     }
     try {
-        Ensure-ThemeApi
         $full = (Resolve-Path $Path).Path
-        Write-Info "Applying saved theme (installs + switches natively, like opening one in Settings)..."
+        $disp = $null
+        try {
+            $raw = Get-Content $full -Raw
+            if ($raw -match '(?m)^DisplayName\s*=\s*(.+?)\s*$') { $disp = $Matches[1].Trim() }
+        } catch { }
+        Write-Info "Applying theme: $(if ($disp) { $disp } else { $full })"
+        Write-Info "(native apply via the Windows shell - identical to double-clicking the .theme file)"
+        Ensure-ThemeApi
         $hcWasOn = [HelloKittyThemeApi.Native]::IsHighContrastOn()
-        [HelloKittyThemeApi.Native]::ImportRoaming($full) | Out-Null
-        # same High-Contrast auto-undo as theme-switch
-        Start-Sleep -Milliseconds 1500
-        $hcFl = Get-ItemProperty 'HKCU:\Control Panel\Accessibility\HighContrast' -ErrorAction SilentlyContinue
-        $hcRegOn = ($null -ne $hcFl -and $hcFl.Flags -ne 126)
-        if (-not $hcWasOn -and ([HelloKittyThemeApi.Native]::IsHighContrastOn() -or $hcRegOn)) {
-            [HelloKittyThemeApi.Native]::ForceHighContrastOff() | Out-Null
-            $hcK = 'HKCU:\Control Panel\Accessibility\HighContrast'
-            if (Test-Path $hcK) {
-                Set-ItemProperty -Path $hcK -Name 'Flags' -Value 126 -Type DWord -Force
-                Set-ItemProperty -Path $hcK -Name 'High Contrast Scheme' -Value '' -Force
-                Remove-ItemProperty -Path $hcK -Name 'Previous High Contrast Scheme MUI Value' -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $hcK -Name 'Previous High Contrast Scheme MUI Ptr' -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $hcK -Name 'LastUpdatedThemeId' -ErrorAction SilentlyContinue
-            }
-            Write-Warn "The saved theme turned ON High Contrast mode - switched back OFF automatically."
+        Start-Process $full | Out-Null
+        Undo-HighContrastIfNeeded $hcWasOn "The applied theme"
+        $cur = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes' -ErrorAction SilentlyContinue).CurrentTheme
+        if ($cur -eq $full) {
+            Write-Ok "Theme applied: $full (now the active theme)"
+        } else {
+            Write-Ok "Theme handed to Windows to apply: $full"
+            Write-Info "Current theme registry value: $cur"
         }
-        Write-Ok "Theme applied: $full"
+        Write-Warn "Note: .theme files cannot carry the Start-menu palette / transparency / taskbar acrylic."
+        Write-Warn "For a full pixel-perfect restore of a saved profile, use 'restore' instead of theme-restore."
     } catch {
         Write-Warn "Could not apply theme: $($_.Exception.Message)"
     }
@@ -525,23 +570,7 @@ function Switch-NativeTheme {
             return
         }
         # Auto-undo High Contrast if the applied theme turned it on.
-        # The flag can land asynchronously shortly after the apply - re-check.
-        Start-Sleep -Milliseconds 1500
-        $hcFl = Get-ItemProperty 'HKCU:\Control Panel\Accessibility\HighContrast' -ErrorAction SilentlyContinue
-        $hcRegOn = ($null -ne $hcFl -and $hcFl.Flags -ne 126)   # 126 = baseline off; anything else = on
-        if (-not $hcWasOn -and ([HelloKittyThemeApi.Native]::IsHighContrastOn() -or $hcRegOn)) {
-            [HelloKittyThemeApi.Native]::ForceHighContrastOff() | Out-Null
-            $hcK = 'HKCU:\Control Panel\Accessibility\HighContrast'
-            if (Test-Path $hcK) {
-                Set-ItemProperty -Path $hcK -Name 'Flags' -Value 126 -Type DWord -Force
-                Set-ItemProperty -Path $hcK -Name 'High Contrast Scheme' -Value '' -Force
-                Remove-ItemProperty -Path $hcK -Name 'Previous High Contrast Scheme MUI Value' -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $hcK -Name 'Previous High Contrast Scheme MUI Ptr' -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $hcK -Name 'LastUpdatedThemeId' -ErrorAction SilentlyContinue
-            }
-            Write-Warn "Theme $idx turned ON High Contrast mode - it was switched back OFF automatically."
-            Write-Warn "(Re-run 'apply' or switch to a normal theme index if the desktop looks wrong.)"
-        }
+        Undo-HighContrastIfNeeded $hcWasOn "Theme $idx"
         $curTheme = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes' -ErrorAction SilentlyContinue).CurrentTheme
         if ($curTheme -and $curTheme -like '*\Ease of Access Themes\*') {
             Write-Warn "Note: the applied theme is an Ease-of-Access (High Contrast) theme."
@@ -692,91 +721,211 @@ function Write-HKThemeFile {
     }
 }
 
-function Refresh-Shell {
+# ----------------------------------------------------------------------------
+# Shell refresh - layered and SAFE. The old code force-killed explorer and then
+# trusted Winlogon to bring it back; when the shell crashed after restart (a
+# recurring explorer.exe 0xc0000005 bug on some machines) Winlogon can refuse /
+# throttle the restart, leaving the desktop dead while the script prints "Done".
+# New rules:
+#   1. Try a live, NON-destructive refresh first (the shell and DWM pick up most
+#      accent / palette / transparency changes without a restart).
+#   2. Restart ONLY the Start-menu host process (it respawns by itself) to
+#      repaint the Start palette.
+#   3. If a real explorer restart is still needed, do it with a GUARANTEE:
+#      verify stability (not mere presence), retry, and never return with the
+#      shell dead.
+#   4. A short background watchdog heals the desktop even if explorer crashes
+#      in the minutes after we finish (the "done but dead" failure window).
+# ----------------------------------------------------------------------------
+
+<#
+  Broadcast "per-user system parameters changed" so DWM and the shell re-read the
+  Personalize / DWM / Accent keys live. This is the refresh Windows Settings
+  performs for most colour / accent / transparency toggles and does NOT kill
+  explorer.
+#>
+function Update-PerUserSettings {
+    try {
+        Step "Update-PerUserSettings: broadcasting live settings refresh"
+        $r = Start-Process (Join-Path $env:SystemRoot 'System32\rundll32.exe') `
+                -ArgumentList 'user32.dll,UpdatePerUserSystemParameters' `
+                -WindowStyle Hidden -PassThru
+        try { $r.WaitForExit(5000) | Out-Null } catch { }
+    } catch {
+        Step "Update-PerUserSettings skipped: $($_.Exception.Message)"
+    }
+}
+
+<#
+  The Start menu caches its accent palette inside StartMenuExperienceHost.exe.
+  Restarting just that host (it respawns automatically on demand) repaints the
+  Start menu with the new palette while explorer.exe stays up - a far narrower
+  blast radius than a full shell restart.
+#>
+function Restart-StartMenuHost {
+    try {
+        $hosts = Get-Process StartMenuExperienceHost -ErrorAction SilentlyContinue
+        if ($hosts) {
+            Write-Info "Repainting Start menu (restarting its host process - explorer stays up)..."
+            $hosts | Stop-Process -Force -ErrorAction SilentlyContinue
+            Step "Restart-StartMenuHost: restarted Start menu host PID $($hosts.Id -join ',')"
+        }
+    } catch {
+        Step "Restart-StartMenuHost skipped: $($_.Exception.Message)"
+    }
+}
+
+function Test-ExplorerRunning {
+    return [bool](Get-Process explorer -ErrorAction SilentlyContinue)
+}
+
+<#
+  Wait for explorer to be present AND STAY alive for the stability window.
+  Mere presence is not enough - the old code declared "ok" the moment an
+  instance appeared, then the shell died minutes later.
+#>
+function Wait-ExplorerStable {
+    param([int]$TimeoutSeconds = 15, [int]$StableSeconds = 3)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        if (Test-ExplorerRunning) {
+            Start-Sleep -Seconds $StableSeconds
+            return (Test-ExplorerRunning)
+        }
+    }
+    return $false
+}
+
+<#
+  Bulletproof explorer restart. Returns $true only when explorer is running and
+  stable afterwards; never returns having left the shell dead if the OS will
+  still start it. Handles:
+    * Winlogon not restarting the shell (throttled / refused after crashes)
+    * explorer crashing again during the restart window (crash-loop)
+    * double-instance races (we only start explorer when no instance exists)
+#>
+function Restart-ExplorerSafe {
+    $TimeoutSeconds = 20
+    $MaxAttempts     = 3
+    $StableSeconds   = 3
+
+    # Serialize restarts: stop any watchdog left over from a previous run so we
+    # (and Windows) are the only ones who can spawn the shell right now.
+    Stop-ExplorerWatchdog
+
     Write-Info "Restarting explorer so the new colours take effect..."
-    $exp = Get-Process explorer -ErrorAction SilentlyContinue
-    if ($exp) { $exp | Stop-Process -Force }
-    # Winlogon ALWAYS restarts the shell on its own (event 1002) - manually
-    # starting a second explorer.exe races Winlogon and makes the two instances
-    # crash each other (observed: deterministic explorer AV shortly after boot).
-    # So: wait patiently for Winlogon; only start as a last resort.
-    $ok = $false
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Seconds 2
-        if (Get-Process explorer -ErrorAction SilentlyContinue) { $ok = $true; break }
+    $existing = Get-Process explorer -ErrorAction SilentlyContinue
+    if ($existing) {
+        Step "Restart-ExplorerSafe: stopping explorer PID $($existing.Id -join ',')"
+        $existing | Stop-Process -Force -ErrorAction SilentlyContinue
     }
-    if (-not $ok) {
-        # last resort - only when absolutely no instance exists
-        if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
-            Start-Process explorer.exe
-            Start-Sleep -Seconds 5
-            if (Get-Process explorer -ErrorAction SilentlyContinue) { $ok = $true }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        Step "Restart-ExplorerSafe: attempt $attempt - waiting for a stable explorer"
+        # Let Winlogon try first: it owns the correct session / user context.
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline -and -not (Test-ExplorerRunning)) {
+            Start-Sleep -Milliseconds 500
         }
-    }
-    if (-not $ok) {
-        Write-Warn "Explorer did not come back by itself. Start it with: Start-Process explorer.exe  (or log off/on)"
-    } else {
-        # give the freshly started shell a moment to settle (it may crash once
-        # after a forced kill; Winlogon will bring it back)
-        Start-Sleep -Seconds 3
-    }
-}
-
-function Get-FontFamilyName($FontFile) {
-    try {
-        Add-Type -AssemblyName System.Drawing
-        $col = New-Object System.Drawing.Text.PrivateFontCollection
-        $col.AddFontFile($FontFile)
-        return $col.Families[0].Name
-    } catch {
-        return $null
-    }
-}
-
-function Install-Font {
-    param([string]$FontFile)
-    try {
-        if (-not (Test-Path $FontFile)) { Write-Warn "Font not found: $FontFile"; return }
-        $fontsDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-        if (-not (Test-Path $fontsDir)) { New-Item -ItemType Directory -Force -Path $fontsDir | Out-Null }
-        $dest = Join-Path $fontsDir (Split-Path $FontFile -Leaf)
-
-        # The font may already be installed and locked by the font system - don't re-copy.
-        if (Test-Path $dest) {
-            Write-Info "Font already present: $(Split-Path $FontFile -Leaf)"
+        # Stability check - the guarantee the old code never made.
+        if (Wait-ExplorerStable 3 $StableSeconds) {
+            Step "Restart-ExplorerSafe: explorer stable after attempt $attempt"
+            Write-Ok "Explorer restarted and stable."
+            return $true
+        }
+        # Winlogon did not (or could not) bring it back - start it directly in
+        # the interactive session. Safe here: no instance exists right now.
+        if ($attempt -lt $MaxAttempts) {
+            Write-Warn "Explorer is not coming back by itself - starting it directly (attempt $attempt/$MaxAttempts)."
         } else {
-            Copy-Item $FontFile $dest -Force
+            Write-Warn "Explorer is not coming back - final start attempt."
         }
-
-        $key = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
-        if (-not (Test-Path $key)) { New-Item -Force -Path $key | Out-Null }
-        $ext  = [System.IO.Path]::GetExtension($FontFile).ToLower()
-        $kind = if ($ext -eq '.ttf') { 'TrueType' } else { 'OpenType' }
-
-        # The registry value name MUST be the font's *family* name (e.g. "Cookie (TrueType)"),
-        # not the file name - apps look the font up by family name. Windows also scans the
-        # per-user Fonts folder at logon, but registering the right name now makes the font
-        # usable immediately in this session.
-        $family = Get-FontFamilyName $FontFile
-        if (-not $family) { $family = [System.IO.Path]::GetFileNameWithoutExtension($FontFile) }
-        $name = "$family ($kind)"
-
-        # Remove a stale entry created by older versions of this script (filename-based).
-        $legacy = "$([System.IO.Path]::GetFileNameWithoutExtension($FontFile)) ($kind)"
-        if ($legacy -ne $name) { Remove-ItemProperty -Path $key -Name $legacy -ErrorAction SilentlyContinue }
-
-        $existing = (Get-ItemProperty $key -ErrorAction SilentlyContinue).PSObject.Properties |
-            Where-Object { $_.Value -eq $dest }
-        if (-not $existing) {
-            New-ItemProperty -Path $key -Name $name -Value $dest -PropertyType String -Force | Out-Null
+        try {
+            Start-Process explorer.exe | Out-Null
+        } catch {
+            Step "Restart-ExplorerSafe: start failed: $($_.Exception.Message)"
         }
-        # Make the font usable in this session without logging off
-        Ensure-WinApi
-        try { [HelloKittyWinAPI]::AddFontResource($dest) | Out-Null } catch { }
-        Write-Ok "Installed font: $family"
-    } catch {
-        Write-Warn "Font install issue for $(Split-Path $FontFile -Leaf): $_"
     }
+
+    if (Test-ExplorerRunning) {
+        Step "Restart-ExplorerSafe: explorer is running after manual start"
+        Write-Ok "Explorer started."
+        return $true
+    }
+    Write-Warn "Could not start Explorer. Start it manually with: Start-Process explorer.exe  (or log off/on)"
+    Step "Restart-ExplorerSafe: FAILED - explorer not running"
+    return $false
+}
+
+$WatchdogScript = Join-Path $StateDir 'explorer-watchdog.ps1'
+
+<#
+  Detached, one-shot background safety net. If explorer dies in the minutes
+  after we finish (e.g. a shell crash bug or Winlogon throttle), starting it
+  again. Does nothing while explorer is up; exits after $Seconds.
+#>
+function Start-ExplorerWatchdog {
+    param([int]$Seconds = 180)
+    try {
+        Remove-Item $WatchdogScript -Force -ErrorAction SilentlyContinue
+        $content = @'
+param([int]$Seconds)
+$deadline = (Get-Date).AddSeconds($Seconds)
+$missing = 0
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 10
+    if (Get-Process explorer -ErrorAction SilentlyContinue) { $missing = 0 }
+    else { $missing++ }
+    if ($missing -ge 2) {
+        $missing = 0
+        try { Start-Process explorer.exe -ErrorAction Stop | Out-Null } catch { }
+    }
+}
+'@
+        Set-Content -Path $WatchdogScript -Value $content -Encoding ASCII
+        Start-Process powershell.exe -ArgumentList @(
+            '-NoProfile', '-WindowStyle', 'Hidden',
+            '-File', "`"$WatchdogScript`"", $Seconds
+        ) -WindowStyle Hidden | Out-Null
+        Step "Start-ExplorerWatchdog: watching for $Seconds seconds"
+    } catch {
+        Step "Start-ExplorerWatchdog skipped: $($_.Exception.Message)"
+    }
+}
+
+<#
+  Kill any watchdog still watching from a previous run. Back-to-back apply/restore
+  must NEVER have two watchdogs alive: they could each start explorer and race
+  Windows' own restart into a two-instance shell. One watchdog, always the newest.
+#>
+function Stop-ExplorerWatchdog {
+    try {
+        Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like '*explorer-watchdog.ps1*' } |
+            ForEach-Object {
+                Step "Stop-ExplorerWatchdog: stopping old watchdog PID $($_.ProcessId)"
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+    } catch {
+        Step "Stop-ExplorerWatchdog skipped: $($_.Exception.Message)"
+    }
+}
+
+function Refresh-Shell {
+    # Apply the theme LIVE and never touch explorer. Measured on this machine
+    # (Win10 21H2): the theme values do NOT crash explorer - pid stayed stable
+    # for 5 minutes. It is the kill + restart cycle that triggers a recurring
+    # explorer.exe access violation (fault offset 0x458aa), leaving the desktop
+    # dead. So apply/restore NO LONGER restart the shell:
+    #   Layer 1: broadcast "per-user system parameters changed" - DWM and the
+    #            shell re-read accent / palette / transparency / wallpaper live.
+    #   Layer 2: repaint the Start menu palette via its host process only.
+    #   Layer 3: short background watchdog as insurance against unrelated crashes.
+    # Users who specifically want the shell restarted can run 'restart-shell'.
+    Update-PerUserSettings
+    Restart-StartMenuHost
+    Start-ExplorerWatchdog 90
 }
 
 # ----------------------------------------------------------------------------
@@ -885,12 +1034,7 @@ function Apply-TerminalTheme {
     $json.schemes = @($json.schemes | Where-Object { $_.name -ne 'Hello Kitty' })
     $json.schemes += [pscustomobject]$scheme
 
-    # point EVERY profile at the new scheme + cute mono font + acrylic transparency
-    $font = 'Cascadia Code'
-    if (Test-Path $FontIosevka) {
-        $detected = Get-FontFamilyName $FontIosevka
-        if ($detected) { $font = $detected }
-    }
+    # point EVERY profile at the new scheme + acrylic transparency
     $profiles = $json.profiles
     if ($null -eq $profiles) {
         # settings.json without a "profiles" section at all
@@ -906,7 +1050,6 @@ function Apply-TerminalTheme {
     # which the theme enables via EnableTransparency.
     function Set-ProfileScheme($p) {
         $p | Add-Member -MemberType NoteProperty -Name colorScheme -Value 'Hello Kitty' -Force
-        $p | Add-Member -MemberType NoteProperty -Name fontFace -Value $font -Force
         $p | Add-Member -MemberType NoteProperty -Name useAcrylic -Value $true -Force
         $p | Add-Member -MemberType NoteProperty -Name opacity -Value 65 -Force
     }
@@ -927,7 +1070,7 @@ function Apply-TerminalTheme {
     }
 
     $json | ConvertTo-Json -Depth 100 | Set-Content $wt -Encoding UTF8
-    Write-Ok "Windows Terminal: applied 'Hello Kitty' scheme to all profiles (font: $font, acrylic 65%)."
+    Write-Ok "Windows Terminal: applied 'Hello Kitty' scheme to all profiles (acrylic 65%)."
 }
 
 function Restore-TerminalBackup($SettingsPath, $BackupPath) {
@@ -1024,19 +1167,14 @@ function Apply-HelloKitty {
     Set-TaskbarAcrylic $HK_TASKBAR_ACRYLIC
     Step "Apply-HelloKitty: taskbar acrylic set"
     Write-Ok "Taskbar set to frosted acrylic ($HK_TASKBAR_ACRYLIC/255 blur)."
-    # 3. Fonts
-    Install-Font $FontCookie
-    Install-Font $FontIosevka
-    Install-Font $FontSourceCode
-    Step "Apply-HelloKitty: fonts done"
-    # 4. Windows Terminal
+    # 3. Windows Terminal (colors + acrylic)
     Apply-TerminalTheme
-    # 5. Windows-visible theme file (Settings > Themes / native listing)
+    # 4. Windows-visible theme file (Settings > Themes / native listing)
     $hkTheme = Write-HKThemeFile
     if ($hkTheme) {
         Write-Info "  (apply it natively anytime with: hello-kitty.ps1 theme-file)`n" 
     }
-    # 6. Refresh shell
+    # 5. Refresh shell
     Refresh-Shell
     Step "Apply-HelloKitty: shell refreshed"
     Set-Content -Path $StatePath -Value ([ordered]@{ mode = 'hellokitty' } | ConvertTo-Json)
@@ -1095,9 +1233,6 @@ function Restore-Saved {
 function Ensure-Assets {
     $wanted = @{
         $WallpaperSrc   = "$RepoRaw/background.png"
-        $FontCookie     = "$RepoRaw/fonts/Cookie-Regular.ttf"
-        $FontIosevka    = "$RepoRaw/fonts/IosevkaNerdFontComplete-mod.ttf"
-        $FontSourceCode = "$RepoRaw/fonts/SourceCodePro-Regular.otf"
     }
     foreach ($local in $wanted.Keys) {
         if (-not (Test-Path $local)) {
@@ -1135,10 +1270,7 @@ try {
     switch ($Command) {
         'install' {
             Ensure-Assets
-            Install-Font $FontCookie
-            Install-Font $FontIosevka
-            Install-Font $FontSourceCode
-            Write-Pink "Assets + fonts ready."
+            Write-Pink "Assets ready."
         }
         'apply'  { Ensure-Assets; Save-CurrentTheme; Apply-HelloKitty }
         'on'     { Ensure-Assets; Save-CurrentTheme; Apply-HelloKitty }
@@ -1146,9 +1278,16 @@ try {
         'off'    { Restore-Saved }
         'status' { Show-Status }
         'themes' { Show-NativeThemes }
-        'theme-save' { Save-NativeTheme $ThemeArg }
-        'theme-restore' { Restore-NativeTheme $ThemeArg }
+        'theme-save' { Save-ThemeFile $ThemeArg }
+        'savetheme'  { Save-ThemeFile $ThemeArg }
+        'theme-restore' { Restore-ThemeFile $ThemeArg }
         'theme-switch'  { Switch-NativeTheme $ThemeArg }
+        'restart-shell' {
+            # Explicitly opted-in full shell restart with the guaranteed recovery
+            # path. apply/restore do NOT restart explorer anymore (see Refresh-Shell).
+            Restart-ExplorerSafe
+            Start-ExplorerWatchdog 180
+        }
         'theme-file' {
             # (Re)generate the installable Hello Kitty.theme and optionally apply
             # it through Windows' own shell handling (same as double-clicking).

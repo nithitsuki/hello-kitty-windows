@@ -13,8 +13,8 @@ The script does not require Administrator rights. Every change is per-user
 | Original (Linux)            | Windows equivalent                                                          |
 |----------------------------|----------------------------------------------------------------------------|
 | `background.png`           | Desktop wallpaper, set to Fill                                              |
-| `pink.scheme.ini` accent   | Windows accent color `#FF2E6D` on the taskbar, the Start menu, the title bars |
-| white/pink palette         | Light mode (apps and system) with the accent on the taskbar                |
+| `pink.scheme.ini` accent   | Windows accent color `#FF2E6D` on title bars and window borders         |
+| white/pink palette         | Light mode (apps and system); Start and taskbar stay neutral             |
 | `picom` blur               | Frosted acrylic on the taskbar and the Start menu                          |
 | `termite` colors           | A "Hello Kitty" color scheme for Windows Terminal, with acrylic terminal |
 
@@ -32,10 +32,11 @@ The Start menu and the taskbar read different registry values.
 - If "Transparency effects" is off, the Start menu shows that palette color as
   a solid color, not as frosted glass.
 
-The script writes the pink `AccentPalette` and `StartColorMenu`. It also
-forces `EnableTransparency=1`. As a result, the Start menu is pink and frosted,
-like the taskbar. The script saves and restores all of these values with your
-old theme.
+The script writes the pink `AccentPalette` and `StartColorMenu` and forces
+`EnableTransparency=1`, so the Start menu and taskbar render frosted acrylic.
+"Show accent color on Start and taskbar" stays off (`ColorPrevalence=0`), so the
+pink hits the title bars and window borders while the shell surfaces stay
+neutral. The script saves and restores all of these values with your old theme.
 
 ## Usage
 
